@@ -49,6 +49,7 @@ https://Python.org
 Go to CMD Again and do
 
 >Pip Install Requests
+>
 >pip install berserk python-chess
 
 ___
