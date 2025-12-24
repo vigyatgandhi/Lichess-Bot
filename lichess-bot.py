@@ -68,7 +68,7 @@ def load_config(conf_path):
     config = configparser.ConfigParser()
     # Defaults for Lichess connection
     config['lichess'] = {
-        'bot_username': 'Ar4Asd1-BOT',
+        'bot_username': '<your-bot-username>',  # Fill this with your bot's username
         'bot_api_token': '',  # Fill this from lichess.org/my-account/oauth-token
         'base_url': 'https://lichess.org'
     }
@@ -194,12 +194,12 @@ def game_log_filename(game_id, opponent, ts_iso=None):
     return f"game_{ts}_{safe_opp}_{game_id}.log"
 
 
-def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, depth=15):
+def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, depth=30):
     """
     Main game loop for a single game.
     
     Streams game events from Lichess (moves, status).
-    Uses Stockfish engine to compute best moves (depth=15: thinks ~10-30sec).
+    Uses Stockfish engine to compute best moves (depth=30: thinks ~10-30sec).
     Logs moves to per-game file, updates stats.
     Handles bot as white/black, game over (mate/resign/etc.).
     
@@ -231,6 +231,12 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
         'speed': None,
         'is_bot': False  # Set later if opponent is BOT
     }
+    # post a chat message introducing bot username and polite greeting
+    try:
+        logger.info("Posting welcome message in game %s", game_id)
+        client.bots.post_message(game_id, f"Hello! I'm {bot_username}. I was created by Vigyat. I am available at github vigyatgandhi/Lichess-Bot")
+    except Exception as e:
+        logger.exception("Failed to post welcome message: %s", e)
 
     try:
         # Stream game events forever (until over)
