@@ -35,6 +35,8 @@ from logging.handlers import RotatingFileHandler
 # logging & RotatingFileHandler: Logs bot activity to console/files, rotates logs to prevent huge files.
 import os
 # os: Checks files exist, gets current directory.
+import multiprocessing
+# multiprocessing: Determines CPU core count for engine configuration.
 import signal
 # signal: Catches shutdown signals (Ctrl+C) for clean exit.
 import sys
@@ -73,8 +75,10 @@ def load_config(conf_path):
         'base_url': 'https://lichess.org'
     }
     # Stockfish engine path (must be installed locally)
+    # Stockfish engine depth parameter made configurable via play_game function parameter
     config['engine'] = {
-        'stockfish_path': ''  # e.g., '/usr/local/bin/stockfish'
+        'stockfish_path': '',  # e.g., '/usr/local/bin/stockfish'
+        'depth': '15'  # Default depth for Stockfish
     }
     # Logging setup
     config['logging'] = {
@@ -193,8 +197,8 @@ def game_log_filename(game_id, opponent, ts_iso=None):
     safe_opp = (opponent or 'unknown').replace('/', '_').replace(' ', '_')
     return f"game_{ts}_{safe_opp}_{game_id}.log"
 
-
-def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, depth=30):
+#make depth configurable via parameter from config file
+def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, config_depth):
     """
     Main game loop for a single game.
     
@@ -210,6 +214,18 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
     # Launch Stockfish engine process
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+        #change cpu core count based on current system capabilities
+        # use 50% of total physical ram for hash size allocation
+        memory_bytes = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        memory_mb = memory_bytes // (1024 * 1024)
+        max_hash_mb = memory_mb // 2
+        cpu_count = multiprocessing.cpu_count()
+        engine.configure({
+            "Threads": max(1, cpu_count),  
+            "Hash": max_hash_mb    # Give it a 256 MB notebook to remember all those fancy chess moves. Don't skimp!
+        })
+        logger.info("Stockfish powered up with %d cores and %d MB hash!", max(1, cpu_count), max_hash_mb)  # Bragging rights activated.
+
     except Exception as e:
         logger.exception("Failed to open engine: %s", e)
         return
@@ -356,7 +372,7 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                               (board.turn == chess.BLACK and bot_color == 'black')):
                 logger.info('My turn in game %s. FEN: %s', game_id, board.fen())
                 try:
-                    result = engine.play(board, chess.engine.Limit(depth=depth))
+                    result = engine.play(board, chess.engine.Limit(depth=config_depth))
                     best_move = result.move
                     if best_move in board.legal_moves:
                         client.bots.make_move(game_id, best_move.uci())
@@ -417,7 +433,6 @@ def accept_challenge_allowed(challenge, config, state: BotState, logger, bot_use
     variant = (challenge.get('variant') or {}).get('key', '').lower()
     challenger = challenge.get('challenger', {}).get('name')
     is_bot = challenge.get('challenger', {}).get('title', '') == 'BOT' or challenge.get('isBot', False)
-
     # Reject bad variant
     if variant and variant not in variants:
         logger.info('Rejecting challenge from %s: variant %s not allowed', challenger, variant)
@@ -458,6 +473,8 @@ def event_loop(config, logger, state: BotState):
     base_url = config.get('lichess', 'base_url')
     bot_username = config.get('lichess', 'bot_username')
     engine_path = config.get('engine', 'stockfish_path')
+    config_depth = config.getint('engine', 'depth', fallback=15)
+
 
     session = berserk.TokenSession(token)
     client = berserk.Client(session=session, base_url=base_url)
@@ -538,7 +555,7 @@ def event_loop(config, logger, state: BotState):
                     if has_active_game(game_id, logger): continue
 
                     logger.info('Game started: %s', game_id)
-                    t = threading.Thread(target=play_game, args=(client, engine_path, game_id, bot_username, logger, state), daemon=True, name=f'game-{game_id}')
+                    t = threading.Thread(target=play_game, args=(client, engine_path, game_id, bot_username, logger, state, config_depth), daemon=True, name=f'game-{game_id}')
                     t.start()
 
                 elif etype == "gameFinish":
