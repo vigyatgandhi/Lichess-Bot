@@ -2,7 +2,7 @@
 Lichess Chess Bot
 =================
 
-Copyright (C) 2025 [Your Name or Organization Here]
+Copyright (C) 2025 Vigyat Gandhit
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
