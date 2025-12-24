@@ -198,7 +198,7 @@ def game_log_filename(game_id, opponent, ts_iso=None):
     return f"game_{ts}_{safe_opp}_{game_id}.log"
 
 #make depth configurable via parameter from config file
-def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, config_depth):
+def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, config_depth,max_hash_size):
     """
     Main game loop for a single game.
     
@@ -215,14 +215,16 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
         #change cpu core count based on current system capabilities
-        # use 50% of total physical ram for hash size allocation
+        # use 50% of total physical ram for hash size allocation or max_hash_size from config, whichever is lower
         memory_bytes = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
         memory_mb = memory_bytes // (1024 * 1024)
-        max_hash_mb = memory_mb // 2
+        max_hash_mb = min(max_hash_size, memory_mb // 2)
         cpu_count = multiprocessing.cpu_count()
+        # use all the brains we can get!
+        # Give it a large notebook to remember all those fancy chess moves. Don't skimp!
         engine.configure({
             "Threads": max(1, cpu_count),  
-            "Hash": max_hash_mb    # Give it a 256 MB notebook to remember all those fancy chess moves. Don't skimp!
+            "Hash": max_hash_mb    
         })
         logger.info("Stockfish powered up with %d cores and %d MB hash!", max(1, cpu_count), max_hash_mb)  # Bragging rights activated.
 
@@ -474,6 +476,7 @@ def event_loop(config, logger, state: BotState):
     bot_username = config.get('lichess', 'bot_username')
     engine_path = config.get('engine', 'stockfish_path')
     config_depth = config.getint('engine', 'depth', fallback=15)
+    max_hash_size = config.getint('engine', 'max_hash_size', fallback=256)    
 
 
     session = berserk.TokenSession(token)
@@ -555,7 +558,7 @@ def event_loop(config, logger, state: BotState):
                     if has_active_game(game_id, logger): continue
 
                     logger.info('Game started: %s', game_id)
-                    t = threading.Thread(target=play_game, args=(client, engine_path, game_id, bot_username, logger, state, config_depth), daemon=True, name=f'game-{game_id}')
+                    t = threading.Thread(target=play_game, args=(client, engine_path, game_id, bot_username, logger, state, config_depth, max_hash_size), daemon=True, name=f'game-{game_id}')
                     t.start()
 
                 elif etype == "gameFinish":
