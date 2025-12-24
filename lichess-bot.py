@@ -381,12 +381,12 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                         remaining_time = clocks.get('white')
                     else:
                         remaining_time = clocks.get('black')
-                    if remaining_time is not None and remaining_time < 60000:
-                        depth_to_use = min(10, config_depth)
+                    if remaining_time is not None and remaining_time < 10000:
+                        depth_to_use = min(5, config_depth)
                     elif remaining_time is not None and remaining_time < 30000:
                         depth_to_use = min(8, config_depth)
-                    elif remaining_time is not None and remaining_time < 10000:
-                        depth_to_use = min(5, config_depth)
+                    elif remaining_time is not None and remaining_time < 60000:
+                        depth_to_use = min(12, config_depth)
                     else:
                         depth_to_use = config_depth 
                     result = engine.play(board, chess.engine.Limit(depth=depth_to_use))
