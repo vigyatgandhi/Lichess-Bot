@@ -47,7 +47,7 @@ python lichess-bot.py [--conf lichess_bot.conf]
 ## Configuration Options
 | Section | Key | Description | Default |
 |---------|-----|-------------|---------|
-| lichess | bot_username | Bot's Lichess username | Ar4Asd1-BOT |
+| lichess | bot_username | Bot's Lichess username | - |
 | lichess | bot_api_token | OAuth token | (empty) |
 | engine | stockfish_path | Stockfish executable | (empty) |
 | behavior | accept_speeds | Comma-separated: rapid,blitz,classical | rapid,blitz,classical |
