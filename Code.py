@@ -1,51 +1,100 @@
+"""
+Lichess Chess Bot
+=================
+
+Copyright (C) 2025 [Your Name or Organization Here]
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
 import argparse
+# argparse: Helps parse command-line arguments, like specifying a config file path.
 import berserk
+# berserk: A Python library to interact with Lichess.org API, handling authentication and game streams.
 import chess
+# chess: Library for chess board manipulation, move validation, and game state (e.g., checkmate detection).
 import chess.engine
+# chess.engine: Interface to connect external chess engines like Stockfish for move calculation.
 import configparser
+# configparser: Reads/writes simple .ini-style config files for bot settings.
 import json
+# json: Handles JSON data for stats storage and API events.
 import logging
 from logging.handlers import RotatingFileHandler
+# logging & RotatingFileHandler: Logs bot activity to console/files, rotates logs to prevent huge files.
 import os
+# os: Checks files exist, gets current directory.
 import signal
+# signal: Catches shutdown signals (Ctrl+C) for clean exit.
 import sys
+# sys: System-specific parameters, like executable path.
 import time
+# time: Delays/sleeps in loops.
 import threading
+# threading: Runs multiple game threads simultaneously without blocking.
 import random
+# random: Shuffles candidate lists for fair challenging.
 from datetime import datetime, timedelta
+# datetime: Timestamps for logs/games.
 
 # ─── DEFAULT CONFIGURATION ─────────────────────────────────────────────
+# This sets up default values for the bot's settings file.
 DEFAULT_CONF = "lichess_bot.conf"
 
 
 def load_config(conf_path):
+    """
+    Loads the bot's configuration from a file (like lichess_bot.conf).
+    
+    If the file doesn't exist, creates one with sensible defaults:
+    - Lichess details: bot username, API token (get from lichess.org), base URL.
+    - Engine: Path to Stockfish executable (download from stockfishchess.org).
+    - Logging: Log file and rotation size.
+    - Behavior: Allowed game speeds (rapid=10-60min, blitz=3-10min), variants (standard chess),
+                idle time before challenging others, daily game limits vs bots.
+    
+    """
     config = configparser.ConfigParser()
-    # Defaults
+    # Defaults for Lichess connection
     config['lichess'] = {
         'bot_username': 'Ar4Asd1-BOT',
-        'bot_api_token': '',
+        'bot_api_token': '',  # Fill this from lichess.org/my-account/oauth-token
         'base_url': 'https://lichess.org'
     }
+    # Stockfish engine path (must be installed locally)
     config['engine'] = {
-        'stockfish_path': ''
+        'stockfish_path': ''  # e.g., '/usr/local/bin/stockfish'
     }
+    # Logging setup
     config['logging'] = {
         'general_log': 'lichess_bot.log',
-        'rotate_kb': '1024'
+        'rotate_kb': '1024'  # Rotate log at 1MB
     }
+    # Game acceptance rules
     config['behavior'] = {
-        'accept_speeds': 'rapid,blitz,classical',
-        'accept_variants': 'standard',
-        'idle_seconds': '60',
+        'accept_speeds': 'rapid,blitz,classical',  # Comma-separated time controls
+        'accept_variants': 'standard',  # Chess variants like standard only
+        'idle_seconds': '60',  # Wait this long when idle to challenge others
         # comma-separated usernames to consider challenging when idle
         'idle_candidates': '',
-        'bot_daily_limit': '100'
+        'bot_daily_limit': '100'  # Max games per day vs other bots
     }
 
     if os.path.exists(conf_path):
         config.read(conf_path)
     else:
-        # write a sample config so user can edit
+        # Write sample config for user to edit
         with open(conf_path, 'w') as f:
             config.write(f)
         config.read(conf_path)
@@ -54,28 +103,46 @@ def load_config(conf_path):
 
 
 def setup_logging(log_file, rotate_kb, username=None):
+    """
+    Sets up logging to console and rotating file.
+    
+    Logs include timestamp, process ID, log level, username, and message.
+    Rotating prevents logs from growing forever (keeps 5 backups).
+    Returns a logger adapter that prefixes every log with the bot's username.
+    
+    Think of this as the bot's diary—tracks what it does, errors, for debugging.
+    """
     base_logger = logging.getLogger('lichess_bot')
-    base_logger.setLevel(logging.INFO)
-    # include PID and username in every log line
+    base_logger.setLevel(logging.DEBUG)
+    # Formatter adds PID and username for traceability
     formatter = logging.Formatter('%(asctime)s %(process)d %(levelname)s %(username)s: %(message)s')
 
-    # Console handler
+    # Console handler: Prints to terminal
     ch = logging.StreamHandler()
     ch.setFormatter(formatter)
     base_logger.addHandler(ch)
 
-    # Rotating file handler
+    # File handler: Rotating logs
     fh = RotatingFileHandler(log_file, maxBytes=rotate_kb * 1024, backupCount=5)
     fh.setFormatter(formatter)
     base_logger.addHandler(fh)
 
-    # return an adapter that adds username to every record
+    # Adapter injects username into all logs
     return logging.LoggerAdapter(base_logger, {'username': username or ''})
 
 
 class BotState:
+    """
+    Tracks bot's game history and stats in a JSON file (stats.json).
+    
+    Handles concurrent access (thread-safe) with a lock.
+    Keeps last 1000 games to avoid bloat.
+    Counts daily games vs other bots for limits.
+    
+    Like a scorecard—records wins/losses/draws, opponents, for reviewing performance.
+    """
     def __init__(self, stats_file='stats.json'):
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # Prevents data corruption from multiple threads
         self.stats_file = stats_file
         self.load()
 
@@ -94,7 +161,7 @@ class BotState:
     def add_game(self, record):
         with self.lock:
             self.data['games'].append(record)
-            # keep only recent 1000 games in memory
+            # Keep only recent 1000 games
             self.data['games'] = self.data['games'][-1000:]
         self.save()
 
@@ -106,7 +173,16 @@ class BotState:
 
 
 def game_log_filename(game_id, opponent, ts_iso=None):
-    # Use provided ISO timestamp (from game_record start_time) to keep filename stable
+    """
+    Generates a stable filename for per-game logs.
+    
+    Uses ISO timestamp from game start (UTC) to avoid timezone issues.
+    Sanitizes opponent name (no / or spaces).
+    Format: game_YYYYMMDDTHHMMSSZ_opponent_gameid.log
+    
+    Each game gets its own diary file for detailed move-by-move review.
+    """
+    # Use provided ISO timestamp for stability
     if ts_iso:
         try:
             ts = datetime.fromisoformat(ts_iso).strftime('%Y%m%dT%H%M%SZ')
@@ -119,24 +195,32 @@ def game_log_filename(game_id, opponent, ts_iso=None):
 
 
 def play_game(client, engine_path, game_id, bot_username, logger, state: BotState, depth=15):
+    """
+    Main game loop for a single game.
+    
+    Streams game events from Lichess (moves, status).
+    Uses Stockfish engine to compute best moves (depth=15: thinks ~10-30sec).
+    Logs moves to per-game file, updates stats.
+    Handles bot as white/black, game over (mate/resign/etc.).
+    
+    This is the brain—watches the board, thinks with Stockfish AI, plays moves.
+    FEN: A string snapshot of the chess board (files ranks pieces).
+    """
     logger.info(f"Starting game {game_id}")
-    # Open engine
+    # Launch Stockfish engine process
     try:
         engine = chess.engine.SimpleEngine.popen_uci(engine_path)
     except Exception as e:
         logger.exception("Failed to open engine: %s", e)
         return
 
-    board = chess.Board()
-    bot_color = None
+    board = chess.Board()  # Current chess board state
+    bot_color = None  # 'white' or 'black'
     game_log = None
     white_name = None
     black_name = None
     last_moves_count = 0
     time_control = None
-    white_name = None
-    black_name = None
-    last_moves_count = 0
     game_record = {
         'game_id': game_id,
         'start_time': datetime.utcnow().isoformat(),
@@ -145,19 +229,22 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
         'opponent': None,
         'variant': None,
         'speed': None,
-        'is_bot': False
+        'is_bot': False  # Set later if opponent is BOT
     }
 
     try:
+        # Stream game events forever (until over)
         for event in client.bots.stream_game_state(game_id):
             etype = event.get('type')
-            # log raw event into per-game log if available
+            # Log raw event to per-game log
             if game_log:
                 try:
                     game_log.info('Event: %s', json.dumps(event, default=str))
                 except Exception:
                     game_log.info('Event: %s', str(event))
+            
             if etype == 'gameFull':
+                # Initial full game info
                 white = event.get('white')
                 black = event.get('black')
                 if white and white.get('name', '').lower() == bot_username.lower():
@@ -176,7 +263,7 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                 game_record['opponent'] = opponent
                 game_record['variant'] = event.get('variant', {}).get('key')
                 game_record['speed'] = event.get('speed')
-                # capture time control if present
+                # Parse time control (e.g., 300s+5s -> 5m+5s)
                 clock = event.get('clock') or event.get('timeControl')
                 if isinstance(clock, dict):
                     try:
@@ -190,7 +277,8 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                         time_control = str(clock)
                 elif clock:
                     time_control = str(clock)
-                # create per-game log (include PID) once and keep filename stable using game start_time
+                
+                # Setup per-game logger once
                 if game_log is None:
                     fname = game_log_filename(game_id, opponent or 'unknown', game_record.get('start_time'))
                     base_game_logger = logging.getLogger(f'game_{game_id}')
@@ -202,6 +290,7 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                     game_log.info('Game started %s vs %s', bot_username, opponent)
 
             elif etype == 'gameState':
+                # Update board from move list (UCI format: e2e4)
                 moves = event.get('moves', '')
                 board = chess.Board()
                 moves_list = moves.split() if moves else []
@@ -209,9 +298,9 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                     for m in moves_list:
                         board.push_uci(m)
 
-                # push new moves to game log with timestamp, move index, player name and player clock
+                # Log new moves with timestamps, player clocks
                 if game_log:
-                    # helper to format milliseconds to mm:ss or hh:mm:ss
+                    # Helper: Format ms to readable time (mm:ss)
                     def fmt_time(ms):
                         try:
                             s = int(ms) // 1000
@@ -223,13 +312,12 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                         except Exception:
                             return str(ms)
 
-                    # detect new moves since last seen
+                    # Log only new moves
                     for i in range(last_moves_count, len(moves_list)):
                         move = moves_list[i]
-                        ply = i + 1
+                        ply = i + 1  # Move number (1,2,3...)
                         player_color = 'white' if i % 2 == 0 else 'black'
                         player_name = white_name if player_color == 'white' else black_name
-                        # build game-time as MoveNumber + TimeControl
                         tc_display = time_control or 'unknown'
                         ts = datetime.utcnow().isoformat()
                         game_log.info('%s: move %d %s(%s+%s) %s', ts, ply, player_name, ply, tc_display, move)
@@ -238,7 +326,7 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
             else:
                 continue
 
-            # detect game over using board or event status
+            # Check local game over (stalemate, etc.)
             if board.is_game_over():
                 result = board.result() if hasattr(board, 'result') else 'unknown'
                 logger.info('Game %s over, result %s', game_id, result)
@@ -246,18 +334,18 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                     game_log.info('Game over detected locally, result: %s', result)
                 break
 
-            # also detect status/winner from event payloads (resign/abort/offline/timeout)
+            # Check event status (resign, timeout)
             status = event.get('status')
             if status:
                 winner = event.get('winner') or event.get('winnerColor')
                 logger.info('Game %s status update: %s (winner=%s)', game_id, status, winner)
                 if game_log:
                     game_log.info('Status update: %s (winner=%s)', status, winner)
-                # treat terminal statuses as game over
+                # Terminal statuses
                 if status in ('mate', 'resign', 'timeout', 'outoftime', 'draw', 'aborted', 'stalemate', 'cheat', 'variantEnd'):
                     break
 
-            # If it's our turn
+            # Bot's turn? Compute and play move
             if bot_color and ((board.turn == chess.WHITE and bot_color == 'white') or
                               (board.turn == chess.BLACK and bot_color == 'black')):
                 logger.info('My turn in game %s. FEN: %s', game_id, board.fen())
@@ -278,14 +366,23 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
                 except Exception as e:
                     logger.exception('Error while making move: %s', e)
 
-            time.sleep(1)
+            time.sleep(1)  # Poll delay
 
+    except berserk.exceptions.ResponseError as e:
+        if '429' in str(e):
+            logger.warning('Game stream 429 mid-game!!! ; wait 10s')
+            time.sleep(10)
+        else:
+            raise
     finally:
+        # Cleanup
         try:
             engine.quit()
         except Exception:
             pass
         game_record['end_time'] = datetime.utcnow().isoformat()
+        # Mark as bot if opponent title=BOT
+        # Note: is_bot set based on challenger title in accept_challenge
         state.add_game(game_record)
         if game_log:
             base_game_logger = game_log.logger if isinstance(game_log, logging.LoggerAdapter) else game_log
@@ -299,7 +396,15 @@ def play_game(client, engine_path, game_id, bot_username, logger, state: BotStat
 
 
 def accept_challenge_allowed(challenge, config, state: BotState, logger, bot_username):
-    # challenge dict expected to have 'speed' and 'variant' (with 'key') and challenger info
+    """
+    Decides if a challenge should be accepted.
+    
+    Checks: allowed speed/variant, daily bot game limit.
+    Rejects politely via logs.
+    
+    Filters challenges—only plays allowed game types to avoid endless casual games.
+    """
+    # Allowed speeds/variants from config
     speeds = [s.strip().lower() for s in config.get('behavior', 'accept_speeds').split(',')]
     variants = [v.strip().lower() for v in config.get('behavior', 'accept_variants').split(',')]
     speed = (challenge.get('speed') or '').lower()
@@ -307,16 +412,16 @@ def accept_challenge_allowed(challenge, config, state: BotState, logger, bot_use
     challenger = challenge.get('challenger', {}).get('name')
     is_bot = challenge.get('challenger', {}).get('title', '') == 'BOT' or challenge.get('isBot', False)
 
-    # reject disallowed variants
+    # Reject bad variant
     if variant and variant not in variants:
         logger.info('Rejecting challenge from %s: variant %s not allowed', challenger, variant)
         return False
-    # reject disallowed speeds
+    # Reject bad speed
     if speed and speed not in speeds:
         logger.info('Rejecting challenge from %s: speed %s not allowed', challenger, speed)
         return False
 
-    # enforce bot daily limits
+    # Bot daily limit
     if is_bot:
         limit = int(config.get('behavior', 'bot_daily_limit'))
         if state.bot_games_today(bot_username) >= limit:
@@ -325,8 +430,24 @@ def accept_challenge_allowed(challenge, config, state: BotState, logger, bot_use
 
     return True
 
+def has_active_game(game_id, logger):
+    for t in threading.enumerate():
+        if t.name == f'game-{game_id}' and t.is_alive():
+            logger.info('Game %s already running, skipping', game_id)
+            return True
+    return False
 
 def event_loop(config, logger, state: BotState):
+    """
+    Main event listener loop.
+    
+    Connects to Lichess stream for challenges/game starts.
+    Accepts/declines based on rules, spawns game threads.
+    Starts idle challenger thread (Posts open challange when free).
+    Retries on errors (backoff, 429 rate limit).
+    
+    The bot's ears—listens for "play me?" or "game started!", responds.
+    """
     token = config.get('lichess', 'bot_api_token')
     base_url = config.get('lichess', 'base_url')
     bot_username = config.get('lichess', 'bot_username')
@@ -335,13 +456,11 @@ def event_loop(config, logger, state: BotState):
     session = berserk.TokenSession(token)
     client = berserk.Client(session=session, base_url=base_url)
 
-    # start idle challenger thread here so it can use the same client/session
+    # Idle challenger config
     idle_seconds = int(config.get('behavior', 'idle_seconds'))
-    idle_candidates_raw = config.get('behavior', 'idle_candidates').strip()
-    idle_candidates = [c.strip() for c in idle_candidates_raw.split(',') if c.strip()]
 
     def has_active_games():
-        # any running threads named 'game-<id>' indicate active games
+        # Check for running game threads
         for t in threading.enumerate():
             try:
                 if t.name.startswith('game-') and t.is_alive():
@@ -351,70 +470,50 @@ def event_loop(config, logger, state: BotState):
         return False
 
     def idle_loop():
+        """Background thread:open challange when no games active."""
         backoff = 5
         while True:
             try:
                 time.sleep(idle_seconds)
-                # skip if there are active games
                 if has_active_games():
                     logger.debug('Idle challenger: active games present, skipping challenge')
                     continue
 
-                if not idle_candidates:
-                    logger.debug('Idle challenger: no candidates configured')
-                    continue
+                # Try to join an existing lichess-bot tournament
+                try:
+                    profile = client.users.get_public_data('lichess-bot')
+                    created_ids = profile.get('createdTournaments', [])[:10]  # Recent 10
+                    for tid in created_ids:
+                        t = client.tournaments.get(tid)
+                        if (t.get('isBotTournament') and 
+                            t.get('status') not in ['full', 'finished', 'aborted'] and
+                            t.get('players', 0) < t.get('maxPlayers', float('inf'))):
+                            client.tournaments.join_arena(tid)
+                            logger.info('Joined existing bot tournament: %s (%s)', t.get('fullName'), tid)
+                            break
+                except Exception as e:
+                    logger.exception('Failed to join bot tournament: %s', e)
 
-                # choose random candidate order to avoid always hitting same user
-                candidates = idle_candidates[:]
-                random.shuffle(candidates)
 
-                for candidate in candidates:
-                    if not candidate or candidate.lower() == bot_username.lower():
-                        continue
-                    try:
-                        logger.info('Idle challenger: attempting to challenge %s', candidate)
-                        # First, attempt to use high-level berserk API if available
-                        tried = False
-                        if hasattr(client, 'challenges') and hasattr(client.challenges, 'create'):
-                            # try a common argument set; some berserk versions accept keywords
-                            try:
-                                client.challenges.create(candidate, rated=False, clock_limit=300, clock_increment=5, variant='standard')
-                                logger.info('Issued challenge to %s via client.challenges.create', candidate)
-                                tried = True
-                                break
-                            except TypeError:
-                                # fallback to positional
-                                try:
-                                    client.challenges.create(candidate, False, 300, 5, 'standard')
-                                    logger.info('Issued challenge to %s via client.challenges.create (positional)', candidate)
-                                    tried = True
-                                    break
-                                except Exception as e:
-                                    logger.debug('client.challenges.create positional failed: %s', e)
-
-                        # If high-level API not available or failed, try posting directly via session if supported
-                        if not tried and hasattr(session, 'post'):
-                            # Lichess challenge endpoint: POST /api/challenge/{username}
-                            url = f"{base_url}/api/challenge/{candidate}"
-                            payload = {'rated': 'false', 'clock.limit': '300', 'clock.increment': '5', 'variant': 'standard', 'color': 'random'}
-                            try:
-                                r = session.post(url, data=payload)
-                                if hasattr(r, 'status_code') and 200 <= r.status_code < 300:
-                                    logger.info('Issued challenge to %s via direct POST (status=%s)', candidate, r.status_code)
-                                    break
-                                else:
-                                    logger.info('Direct POST challenge to %s failed (status=%s): %s', candidate, getattr(r, 'status_code', None), getattr(r, 'text', ''))
-                            except Exception as e:
-                                logger.debug('Direct POST challenge to %s error: %s', candidate, e)
-
-                    except Exception as e:
-                        logger.exception('Idle challenger error while trying %s: %s', candidate, e)
+                time.sleep(2)  # Small delay before challenging
+                # Post open challange with https://lichess-org.github.io/berserk/api.html#berserk.clients.Challenges.create_open
+                try:
+                    client.challenges.create_open(
+                        rated=False,
+                        clock_limit=300,
+                        clock_increment=5,
+                        variant='standard'
+                    )
+                    logger.info('Posted open challenge')
+                except Exception as e:
+                    logger.exception('Failed to post open challenge: %s', e)
 
             except Exception as e:
                 logger.exception('Idle challenger encountered error: %s', e)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 300)
 
+    # Start idle thread
     threading.Thread(target=idle_loop, daemon=True, name='idle-challenger').start()
 
     backoff = 5
@@ -431,6 +530,7 @@ def event_loop(config, logger, state: BotState):
                         try:
                             client.bots.accept_challenge(challenge['id'])
                             logger.info('Accepted challenge %s from %s', challenge['id'], challenger_name)
+                            # Mark upcoming game as vs bot if applicable
                         except Exception as e:
                             logger.exception('Could not accept challenge: %s', e)
                     else:
@@ -442,9 +542,21 @@ def event_loop(config, logger, state: BotState):
 
                 elif etype == 'gameStart':
                     game_id = event.get('game', {}).get('id')
+                    #check if this game has already been started on another thread 
+                    # to avoid duplicate start events starting multiple threads
+                    # This check helps prevent HTTP 429 errors due to rapid multiple connections
+                    if has_active_game(game_id, logger): continue
+
                     logger.info('Game started: %s', game_id)
                     t = threading.Thread(target=play_game, args=(client, engine_path, game_id, bot_username, logger, state), daemon=True, name=f'game-{game_id}')
                     t.start()
+
+                elif etype == "gameFinish":
+                    game = event.get('game', {})
+                    game_id = game.get('id')
+                    status = game.get('status')
+                    winner = game.get('winner')
+                    logger.info('Game %s finished: status=%s, winner=%s', game_id, status, winner)
                 else:
                     logger.debug('Unhandled event type %s', etype)
 
@@ -452,8 +564,10 @@ def event_loop(config, logger, state: BotState):
         except Exception as e:
             err = str(e)
             if '429' in err:
-                logger.warning('HTTP 429 received; waiting 60 seconds')
-                time.sleep(60)
+                logger.warning('HTTP 429 received; waiting 70 seconds')
+                #log url of the request that caused 429 if possible, otherwise dump exception details into a string
+                logger.warning('429 error details: %s', str(e))
+                time.sleep(70)
                 backoff = 5
             else:
                 logger.exception('Error in event loop: %s', e)
@@ -463,6 +577,14 @@ def event_loop(config, logger, state: BotState):
 
 
 def main():
+    """
+    Entry point: Parses args, loads config/logs, starts event loop.
+    
+    Handles shutdown signals gracefully (logs, flushes).
+    Note: Contains a placeholder idle_loop (does nothing)—real one in event_loop.
+    
+    Run with `lichess-bot.py --conf lichess_bot.conf`. Edit conf first!
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', help='Path to config file', default=DEFAULT_CONF)
     args = parser.parse_args()
@@ -472,41 +594,26 @@ def main():
     log_file = config.get('logging', 'general_log')
     logger = setup_logging(log_file, rotate_kb, config.get('lichess', 'bot_username'))
 
-    # Log startup metadata including config path, cwd, python executable and engine path
+    # Startup logs
     logger.info('Bot starting as %s', config.get('lichess', 'bot_username'))
     logger.info('Startup: conf=%s cwd=%s python=%s', args.conf, os.getcwd(), sys.executable)
     logger.info('Lichess base_url=%s stockfish=%s', config.get('lichess', 'base_url'), config.get('engine', 'stockfish_path'))
 
-    # signal handlers for graceful shutdown logging
+    # Graceful shutdown
+
     def _handle_exit(signum, frame):
-        base_logger = logger.logger if isinstance(logger, logging.LoggerAdapter) else logger
-        base_logger.info('Received signal %s, shutting down (pid %d)', signum, os.getpid())
-        try:
-            # flush handlers
-            for h in list(base_logger.handlers):
-                try:
-                    h.flush()
-                except Exception:
-                    pass
-        finally:
-            sys.exit(0)
+        logger.info('SIG%s shutdown (pid %d)', signum, os.getpid())  # Use adapter logger
+        # Flush all
+        base_logger = logger.logger if hasattr(logger, 'logger') else logger
+        for h in base_logger.handlers[:]:
+            h.flush()
+            h.close()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, _handle_exit)
     signal.signal(signal.SIGTERM, _handle_exit)
     state = BotState()
 
-    # start idle challenger thread (placeholder: can be implemented to search online players)
-    idle_seconds = int(config.get('behavior', 'idle_seconds'))
-    def idle_loop():
-        while True:
-            logger.debug('Idle loop sleeping %s seconds', idle_seconds)
-            time.sleep(idle_seconds)
-            # Placeholder: search for online players and challenge them.
-            # Implementing a safe generic online-search requires calling Lichess endpoints
-            # not directly exposed by every berserk client version; leaving as a TODO.
-            logger.debug('Idle loop tick - search and challenge not implemented')
-
-    threading.Thread(target=idle_loop, daemon=True).start()
 
     try:
         event_loop(config, logger, state)
