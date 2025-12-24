@@ -479,22 +479,6 @@ def event_loop(config, logger, state: BotState):
                     logger.debug('Idle challenger: active games present, skipping challenge')
                     continue
 
-                # Try to join an existing lichess-bot tournament
-                try:
-                    profile = client.users.get_public_data('lichess-bot')
-                    created_ids = profile.get('createdTournaments', [])[:10]  # Recent 10
-                    for tid in created_ids:
-                        t = client.tournaments.get(tid)
-                        if (t.get('isBotTournament') and 
-                            t.get('status') not in ['full', 'finished', 'aborted'] and
-                            t.get('players', 0) < t.get('maxPlayers', float('inf'))):
-                            client.tournaments.join_arena(tid)
-                            logger.info('Joined existing bot tournament: %s (%s)', t.get('fullName'), tid)
-                            break
-                except Exception as e:
-                    logger.exception('Failed to join bot tournament: %s', e)
-
-
                 time.sleep(2)  # Small delay before challenging
                 # Post open challange with https://lichess-org.github.io/berserk/api.html#berserk.clients.Challenges.create_open
                 try:
