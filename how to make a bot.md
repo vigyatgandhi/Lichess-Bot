@@ -54,6 +54,8 @@ You will already have it, check with running following command in terminal:
 
 ```
 which python3
+```
+```
 /usr/bin/python3
 ```
 
